@@ -1,0 +1,948 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Fusion d'Armes</title>
+    <!-- Chargement de Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Configuration des polices et des classes Tailwind -->
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap');
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #0d1117; /* Fond sombre */
+        }
+        .app-container {
+            max-width: 420px; /* Taille typique d'un téléphone */
+            height: 100vh;
+            margin: auto;
+            display: flex;
+            flex-direction: column;
+            box-shadow: 0 0 30px rgba(0 0 0 / 0.5);
+            /* Le background sera défini par le thème dans JS */
+        }
+        .game-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            grid-template-rows: repeat(3, 1fr);
+            aspect-ratio: 1 / 1; /* Carré parfait */
+            gap: 4px;
+        }
+        .weapon-item {
+            cursor: grab; 
+            user-select: none;
+            transition: transform 0.1s;
+            touch-action: none;
+        }
+        .dragging {
+            opacity: 0.8;
+            transform: scale(1.1);
+            position: absolute;
+            z-index: 50;
+            box-shadow: 0 10px 20px rgba(0 0 0 / 0.5);
+        }
+        .ai-button {
+            transition: all 0.2s;
+            box-shadow: 0 4px #7c3aed; 
+        }
+        .ai-button:active {
+            box-shadow: 0 2px #7c3aed;
+            transform: translateY(2px);
+        }
+        .overflow-x-auto::-webkit-scrollbar {
+            height: 8px;
+        }
+        .overflow-x-auto::-webkit-scrollbar-thumb {
+            background-color: #4a5568; 
+            border-radius: 4px;
+        }
+        .overflow-x-auto::-webkit-scrollbar-track {
+            background-color: #1a202c; 
+        }
+    </style>
+    
+    <!-- Code d'initialisation du jeu utilisant localStorage (aucune connexion de sécurité) -->
+    <script>
+        // --- Variables Globales pour le Stockage Local (Simplicité) ---
+        window.isAuthReady = true; // Toujours prêt, car pas d'authentification
+        window.userId = null; // Pas d'ID utilisateur requis
+        window.aiModalContent = null; 
+        
+        // --- Gestion de l'état avec localStorage ---
+        
+        // Sauvegarde l'état actuel du jeu solo
+        window.saveGameState = (state) => {
+            try {
+                localStorage.setItem('weaponMergerState', JSON.stringify(state));
+            } catch (error) {
+                console.error("Erreur de sauvegarde dans localStorage:", error);
+            }
+        };
+
+        // Charge l'état du jeu ou initialise si aucune sauvegarde n'est trouvée
+        window.loadAndListen = () => {
+            try {
+                const savedState = localStorage.getItem('weaponMergerState');
+                if (savedState) {
+                    const loadedState = JSON.parse(savedState);
+                    window.gameState = loadedState;
+                    console.log("État du jeu solo mis à jour par localStorage:", window.gameState);
+                } else {
+                    console.log("Pas d'état de jeu trouvé, initialisation...");
+                    window.gameState = window.initialState;
+                }
+            } catch (error) {
+                console.error("Erreur de chargement depuis localStorage:", error);
+                window.gameState = window.initialState;
+            }
+
+            // Assure que l'état initial est défini pour la vue
+            if (window.gameState.userName === '') { 
+                window.gameState.view = 'name_input';
+            }
+            
+            window.renderApp(); 
+            
+            // Démarrer l'intervalle de spawn si on est dans la vue 'game'
+            if (window.gameState.view === 'game' && !window.gameState.stats.spawnIntervalId) {
+                window.startSpawnInterval();
+            }
+        };
+
+        // Déplace l'appel initial à la fin du script pour s'assurer que toutes les fonctions sont définies.
+        // window.addEventListener('load', window.loadAndListen); // sera appelé à la fin du script
+    </script>
+</head>
+<body class="p-0 m-0 overflow-hidden">
+    <div id="app" class="app-container">
+        <!-- Le contenu sera injecté ici par JavaScript -->
+    </div>
+    
+    <!-- Modal pour les réponses de l'IA -->
+    <div id="ai-modal" class="hidden fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center p-4 z-50">
+        <div class="bg-gray-800 p-6 rounded-xl w-full max-w-md shadow-2xl border border-purple-700">
+            <h3 id="ai-modal-title" class="text-2xl font-bold text-yellow-400 mb-4"></h3>
+            <div id="ai-modal-body" class="text-gray-200 text-sm overflow-y-auto max-h-80 mb-6 whitespace-pre-wrap"></div>
+            <button onclick="closeAIModal()" class="w-full p-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition">Fermer</button>
+        </div>
+    </div>
+
+    <script>
+        // --- Configuration de l'API Gemini ---
+        const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=';
+        const apiKey = ""; 
+
+        async function fetchGeminiResponse(userQuery, systemPrompt) {
+            const payload = {
+                contents: [{ parts: [{ text: userQuery }] }],
+                tools: [{ "google_search": {} }], 
+                systemInstruction: { parts: [{ text: systemPrompt }] },
+            };
+
+            const apiUrl = `${GEMINI_API_URL}${apiKey}`;
+            let response, result;
+
+            for (let i = 0; i < 3; i++) { 
+                try {
+                    response = await fetch(apiUrl, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+
+                    if (response.ok) {
+                        result = await response.json();
+                        const text = result.candidates?.[0]?.content?.parts?.[0]?.text || "Erreur : La réponse de l'IA est vide.";
+                        return text;
+                    } else if (response.status === 429) {
+                        const delay = Math.pow(2, i) * 1000;
+                        await new Promise(resolve => setTimeout(resolve, delay));
+                    } else {
+                        return `Erreur API (${response.status}): ${response.statusText}`;
+                    }
+                } catch (error) {
+                    console.error("Erreur réseau ou parsing:", error);
+                    return "Erreur réseau: Impossible de contacter l'IA.";
+                }
+            }
+            return "Échec de l'appel API après plusieurs tentatives.";
+        }
+        
+        // --- Utilitaires de Modal AI ---
+        const openAIModal = (title, content) => {
+            const modal = document.getElementById('ai-modal');
+            document.getElementById('ai-modal-title').textContent = title;
+            document.getElementById('ai-modal-body').textContent = content; 
+            modal.classList.remove('hidden');
+        };
+
+        const closeAIModal = () => {
+            document.getElementById('ai-modal').classList.add('hidden');
+        };
+
+
+        // --- Données et Configuration du Jeu ---
+
+        const WEAPON_TYPES = [
+            { level: 1, name: "Dague rouillée", rarity: "Commune", color: "text-gray-400", bg: "bg-gray-700", icon: "🗡️", xp: 10 },
+            { level: 2, name: "Épée en fer", rarity: "Commune", color: "text-slate-400", bg: "bg-slate-700", icon: "⚔️", xp: 30 },
+            { level: 3, name: "Hache de guerre", rarity: "Peu Commune", color: "text-green-400", bg: "bg-green-700", icon: "🪓", xp: 90 },
+            { level: 4, name: "Arc long", rarity: "Peu Commune", color: "text-lime-400", bg: "bg-lime-700", icon: "🏹", xp: 270 },
+            { level: 5, name: "Lance runique", rarity: "Rare", color: "text-blue-400", bg: "bg-blue-700", icon: "🔱", xp: 810 },
+            { level: 6, name: "Katana", rarity: "Rare", color: "text-indigo-400", bg: "bg-indigo-700", icon: "🔪", xp: 2430 },
+            { level: 7, name: "Marteau de Thor", rarity: "Épique", color: "text-purple-400", bg: "bg-purple-700", icon: "🔨", xp: 7290 },
+            { level: 8, name: "Sceptre cosmique", rarity: "Légendaire", color: "text-yellow-400", bg: "bg-yellow-700", icon: "✨", xp: 21870 }
+        ];
+        
+        // --- Configuration des Thèmes Visuels ---
+        const THEMES = {
+            'default': { 
+                name: 'Forge Sombre (Base)', 
+                bgClass: 'bg-gray-900', 
+                baseColor: '#161b22', 
+                accentColorClass: 'text-yellow-400',
+                filter: 'grayscale(0%)'
+            },
+            'void': { 
+                name: 'Néant Astral', 
+                bgClass: 'bg-black', 
+                baseColor: 'rgba(0,0,0,0.9)', 
+                accentColorClass: 'text-indigo-300',
+                filter: 'sepia(30%)'
+            },
+            'flame': { 
+                name: 'Fournaise Ardente', 
+                bgClass: 'bg-red-900', 
+                baseColor: 'rgba(127, 29, 29, 0.9)', 
+                accentColorClass: 'text-orange-400',
+                filter: 'hue-rotate(20deg)'
+            },
+            'christmas': { 
+                name: 'Hiver de Noël', 
+                bgClass: 'bg-teal-900', 
+                baseColor: 'rgba(13, 110, 100, 0.9)', 
+                accentColorClass: 'text-red-300',
+                filter: 'contrast(120%)'
+            },
+            'halloween': { 
+                name: 'Nuit Hantée', 
+                bgClass: 'bg-purple-900', 
+                baseColor: 'rgba(64, 21, 93, 0.9)', 
+                accentColorClass: 'text-orange-600',
+                filter: 'sepia(50%) hue-rotate(-20deg)'
+            },
+            'spring': { 
+                name: 'Printemps Floral', 
+                bgClass: 'bg-green-700', 
+                baseColor: 'rgba(4, 120, 87, 0.9)', 
+                accentColorClass: 'text-pink-300',
+                filter: 'hue-rotate(-50deg) saturate(150%)'
+            }
+        };
+
+        const GRID_SIZE = 9; 
+        const MAX_INVENTORY_SIZE = 5;
+
+        // État initial du jeu
+        window.initialState = {
+            view: 'name_input', 
+            userName: '', 
+            lastMergedWeapon: null, 
+            level: 1,
+            xp: 0,
+            xpToNextLevel: 100,
+            money: 100, 
+            grid: Array(GRID_SIZE).fill(null), 
+            inventory: [], 
+            stats: {
+                spawnSpeed: 5000, 
+                rareChance: 0.1, 
+                spawnIntervalId: null, 
+            },
+            // NOUVEAU: Thème et Luminosité
+            currentTheme: 'default',
+            brightness: 100, // 0 à 200
+            aiAnalysisHistory: {} 
+        };
+
+        window.gameState = JSON.parse(JSON.stringify(window.initialState)); 
+        
+        // --- Contrôle de la Luminosité ---
+        const updateBrightness = (newBrightness) => {
+            window.gameState.brightness = newBrightness;
+            window.saveGameState(window.gameState);
+            window.renderApp(); 
+        };
+        
+        // --- Contrôle du Thème ---
+        window.setTheme = (themeId) => {
+            if (THEMES[themeId]) {
+                window.gameState.currentTheme = themeId;
+                window.saveGameState(window.gameState);
+                window.renderApp(); 
+                showMessage(`Thème changé : ${THEMES[themeId].name}`);
+            }
+        };
+
+
+        // --- Fonctions Utilitaires du Jeu ---
+        
+        const generateId = (length = 6) => {
+            let result = '';
+            const characters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+            const charactersLength = characters.length;
+            for (let i = 0; i < length; i++) {
+                result += characters.charAt(Math.floor(Math.random() * charactersLength));
+            }
+            return result;
+        };
+        
+        const getWeaponData = (level) => {
+            const index = Math.min(level, WEAPON_TYPES.length) - 1;
+            const baseData = WEAPON_TYPES[index];
+
+            if (level > WEAPON_TYPES.length) {
+                const lastType = WEAPON_TYPES[WEAPON_TYPES.length - 1];
+                return {
+                    level: level,
+                    name: `${lastType.name} (Élevé ${level})`,
+                    rarity: "Ultime",
+                    color: "text-red-400", 
+                    bg: "bg-red-700", 
+                    icon: "🔥",
+                    xp: lastType.xp * (level - WEAPON_TYPES.length + 1) * 3 
+                };
+            }
+            return baseData || WEAPON_TYPES[0];
+        };
+
+        const spawnWeapon = (level = 1) => {
+            if (window.gameState.inventory.length >= MAX_INVENTORY_SIZE) return;
+
+            let maxLevel = Math.min(3, Math.floor(window.gameState.level / 5) + 1);
+            let weaponLevel = level; 
+
+            if (weaponLevel === 1) { 
+                let rarityRoll = Math.random();
+
+                if (rarityRoll < window.gameState.stats.rareChance && maxLevel > 1) {
+                    weaponLevel = Math.min(maxLevel, Math.floor(Math.random() * maxLevel) + 2);
+                } else {
+                    weaponLevel = 1;
+                }
+            }
+            
+            const newWeapon = { ...getWeaponData(weaponLevel), id: generateId(10) };
+            window.gameState.inventory = [...window.gameState.inventory, newWeapon];
+        };
+
+        window.startSpawnInterval = () => {
+            if (window.gameState.stats.spawnIntervalId) {
+                clearInterval(window.gameState.stats.spawnIntervalId);
+            }
+            const intervalId = setInterval(() => {
+                spawnWeapon();
+                window.saveGameState(window.gameState); 
+                window.renderApp(); 
+            }, window.gameState.stats.spawnSpeed);
+            window.gameState.stats.spawnIntervalId = intervalId;
+            console.log("Intervalle de spawn démarré:", intervalId);
+        };
+        
+        const stopSpawnInterval = () => {
+            if (window.gameState.stats.spawnIntervalId) {
+                clearInterval(window.gameState.stats.spawnIntervalId);
+                window.gameState.stats.spawnIntervalId = null;
+                console.log("Intervalle de spawn stoppé.");
+            }
+        };
+
+        const addXP = (amount) => {
+            window.gameState.xp += amount;
+            while (window.gameState.xp >= window.gameState.xpToNextLevel) {
+                window.gameState.xp -= window.gameState.xpToNextLevel;
+                window.gameState.level += 1;
+                window.gameState.xpToNextLevel = Math.floor(window.gameState.xpToNextLevel * 1.5); 
+            }
+            window.saveGameState(window.gameState);
+        };
+
+        // --- Logique de Glisser-Déposer (Drag and Drop) ---
+
+        let draggingWeaponId = null;
+        let sourceIndex = null; 
+        let isDragging = false;
+        
+        // Fonction utilitaire pour obtenir la position du client (souris ou toucher)
+        const getClientPos = (event) => {
+            if (event.touches && event.touches.length > 0) {
+                return { clientX: event.touches[0].clientX, clientY: event.touches[0].clientY };
+            }
+            if (event.changedTouches && event.changedTouches.length > 0) {
+                return { clientX: event.changedTouches[0].clientX, clientY: event.changedTouches[0].clientY };
+            }
+            return { clientX: event.clientX, clientY: event.clientY };
+        };
+
+
+        const startDrag = (event, id, source, index) => {
+            if (event.type === 'touchstart' || event.type === 'touchmove' || event.type === 'touchend') {
+                event.preventDefault();
+            } else if (event.type !== 'mousedown') {
+                event.preventDefault();
+            }
+
+            draggingWeaponId = id;
+            sourceIndex = index;
+
+            const originalWeaponElement = event.currentTarget;
+            const clone = originalWeaponElement.cloneNode(true);
+            clone.id = 'drag-clone';
+            clone.style.position = 'absolute';
+            clone.style.pointerEvents = 'none'; 
+            clone.classList.add('dragging');
+            document.getElementById('app').appendChild(clone);
+
+            originalWeaponElement.style.visibility = 'hidden';
+
+            isDragging = true;
+            
+            updateDragPosition(event);
+
+            document.addEventListener('mousemove', updateDragPosition);
+            document.addEventListener('mouseup', dropWeapon);
+            document.addEventListener('touchmove', updateDragPosition, { passive: false });
+            document.addEventListener('touchend', dropWeapon);
+        };
+
+        const updateDragPosition = (event) => {
+            if (!isDragging) return;
+            if (event.type === 'touchmove') {
+                event.preventDefault(); 
+            }
+
+            const clone = document.getElementById('drag-clone');
+            if (!clone) return;
+
+            const { clientX, clientY } = getClientPos(event);
+
+            const container = document.getElementById('app');
+            const containerRect = container.getBoundingClientRect();
+            
+            const offsetX = clone.offsetWidth / 2;
+            const offsetY = clone.offsetHeight / 2;
+
+            clone.style.left = `${clientX - containerRect.left - offsetX}px`;
+            clone.style.top = `${clientY - containerRect.top - offsetY}px`;
+        };
+
+        const dropWeapon = (event) => {
+            if (!isDragging) return;
+            isDragging = false;
+            
+            const clone = document.getElementById('drag-clone');
+            if (clone) clone.remove();
+            
+            const originalWeaponElement = document.querySelector(`.weapon-item[data-id="${draggingWeaponId}"]`);
+            if (originalWeaponElement) originalWeaponElement.style.visibility = 'visible';
+
+            document.removeEventListener('mousemove', updateDragPosition);
+            document.removeEventListener('mouseup', dropWeapon);
+            document.removeEventListener('touchmove', updateDragPosition);
+            document.removeEventListener('touchend', dropWeapon);
+
+            const { clientX, clientY } = getClientPos(event);
+
+            if (clientX === undefined || clientY === undefined) return;
+
+            const targetElement = document.elementFromPoint(clientX, clientY);
+            
+            if (targetElement) {
+                const targetGridSlot = targetElement.closest('.grid-slot');
+                const targetGridIndex = targetGridSlot ? targetGridSlot.dataset.index : undefined;
+                
+                if (targetGridIndex !== undefined) {
+                    handleDropOnGrid(parseInt(targetGridIndex));
+                } else {
+                    if (sourceIndex === 'inventory') {
+                        const emptyIndex = window.gameState.grid.findIndex(slot => slot === null);
+                        if (emptyIndex !== -1) {
+                            handleDropOnGrid(emptyIndex);
+                        }
+                    }
+                }
+            }
+            
+            draggingWeaponId = null;
+            sourceIndex = null;
+            window.renderApp();
+        };
+
+        const handleDropOnGrid = (targetIndex) => {
+            const targetWeapon = window.gameState.grid[targetIndex];
+            
+            let sourceWeapon;
+            if (sourceIndex === 'inventory') {
+                sourceWeapon = window.gameState.inventory.find(w => w.id === draggingWeaponId);
+            } else {
+                const sourceIndexInt = parseInt(sourceIndex);
+                sourceWeapon = window.gameState.grid[sourceIndexInt];
+            }
+
+            if (!sourceWeapon) return;
+
+            // 1. Logique de fusion 
+            if (targetWeapon && sourceWeapon.level === targetWeapon.level) {
+                performMerge(sourceWeapon.level, targetIndex, sourceIndex, sourceWeapon.id);
+            }
+            // 2. Logique de placement/déplacement vers un emplacement vide
+            else if (targetWeapon === null) {
+                if (sourceIndex === 'inventory') {
+                    window.gameState.inventory = window.gameState.inventory.filter(w => w.id !== draggingWeaponId);
+                    window.gameState.grid[targetIndex] = sourceWeapon;
+                    showMessage(`Arme placée dans la grille.`);
+                } else {
+                    const sourceIndexInt = parseInt(sourceIndex);
+                    // Échange direct si la source et la cible sont des emplacements de grille
+                    window.gameState.grid[targetIndex] = sourceWeapon;
+                    window.gameState.grid[sourceIndexInt] = null;
+                    showMessage(`Arme déplacée.`);
+                }
+            } else {
+                showMessage('Fusion impossible ou emplacement occupé.');
+            }
+
+            window.saveGameState(window.gameState);
+        };
+        
+        const performMerge = (level, targetIndex, sourceArea, sourceIdOrIndex) => {
+            const nextLevel = level + 1;
+            const newWeaponData = { ...getWeaponData(nextLevel), id: generateId(10) };
+            
+            window.gameState.grid[targetIndex] = newWeaponData;
+            window.gameState.lastMergedWeapon = newWeaponData; 
+
+            if (sourceArea === 'inventory') {
+                window.gameState.inventory = window.gameState.inventory.filter(w => w.id !== sourceIdOrIndex);
+            } else { 
+                window.gameState.grid[parseInt(sourceArea)] = null;
+            }
+
+            const mergedWeapon = getWeaponData(level);
+            addXP(mergedWeapon.xp);
+            window.gameState.money += mergedWeapon.level * 5; 
+
+            const numSpawns = nextLevel; 
+            for (let i = 0; i < numSpawns; i++) {
+                spawnWeapon(1); 
+            }
+            
+            showMessage(`Fusion réussie! ${newWeaponData.name} créée. (+${mergedWeapon.xp} XP, +${mergedWeapon.level * 5} 💰, +${numSpawns} 🗡️ générées)`);
+        };
+
+        // --- Fonctions Gemini AI ---
+
+        // Fonction 1: Analyse stratégique de la dernière arme fusionnée
+        window.analyzeLastWeapon = async () => {
+            if (!window.gameState.lastMergedWeapon) { 
+                showMessage("Vous devez d'abord fusionner deux armes pour obtenir une analyse !");
+                return;
+            }
+            
+            const cost = 50;
+            if (window.gameState.money < cost) {
+                showMessage(`Il vous faut ${cost} 💰 pour l'analyse d'expert.`);
+                return;
+            }
+
+            window.gameState.money -= cost;
+            window.saveGameState(window.gameState);
+            window.renderApp(); 
+
+            const weapon = window.gameState.lastMergedWeapon; 
+            const title = `Analyse d'Expert de ${weapon.name}`;
+            openAIModal(title, "Analyse en cours... Veuillez patienter.");
+
+            const userQuery = `Fournis une analyse stratégique pour l'arme suivante : Nom: ${weapon.name}, Niveau: ${weapon.level}, Rareté: ${weapon.rarity}, Icône: ${weapon.icon}. Évalue ses forces et faiblesses dans un jeu RPG de fantaisie classique.`;
+            const systemPrompt = "Tu es un analyste d'armes légendaire. Ta réponse doit être en français, concise, structurée en deux sections (Forces et Faiblesses), et doit aider le joueur à comprendre l'arme stratégiquement.";
+
+            const result = await fetchGeminiResponse(userQuery, systemPrompt);
+            document.getElementById('ai-modal-body').textContent = result;
+        };
+        
+        // Fonction 2: Génération du Lore/Histoire de l'arme
+        window.generateWeaponLore = async (weaponId) => {
+            const weapon = window.gameState.inventory.find(w => w.id === weaponId) || 
+                           window.gameState.grid.find(w => w && w.id === weaponId);
+            
+            if (!weapon) return;
+
+            const cost = 25;
+            if (window.gameState.money < cost) {
+                showMessage(`Il vous faut ${cost} 💰 pour générer une histoire.`);
+                return;
+            }
+            
+            if (window.gameState.aiAnalysisHistory[weapon.id]) {
+                openAIModal(`Légende de ${weapon.name} (Archivée)`, window.gameState.aiAnalysisHistory[weapon.id]);
+                return;
+            }
+
+
+            window.gameState.money -= cost;
+            window.saveGameState(window.gameState);
+            window.renderApp(); 
+
+            const title = `Légende de ${weapon.name}`;
+            openAIModal(title, "Génération de l'histoire en cours... L'IA imagine son passé.");
+
+            const userQuery = `Invente une légende épique ou une histoire courte (maximum 100 mots) sur l'origine de cette arme : Nom: ${weapon.name}, Niveau: ${weapon.level}, Rareté: ${weapon.rarity}, Icône: ${weapon.icon}. L'histoire doit correspondre à sa rareté.`;
+            const systemPrompt = "Tu es un conteur mystique. Rédige une légende captivante en français et donne-lui un ton qui correspond à la rareté de l'arme (Commune, Rare, Légendaire). Ne te contente pas de lister les caractéristiques.";
+
+            const result = await fetchGeminiResponse(userQuery, systemPrompt);
+            
+            window.gameState.aiAnalysisHistory[weapon.id] = result;
+            window.saveGameState(window.gameState);
+
+            document.getElementById('ai-modal-body').textContent = result;
+        };
+
+        // Fonction 3: Conseil Stratégique du Maître Forgeron
+        window.getMentorAdvice = async () => {
+            const cost = 75;
+            if (window.gameState.money < cost) {
+                showMessage(`Il vous faut ${cost} 💰 pour l'avis stratégique du Maître Forgeron.`);
+                return;
+            }
+
+            window.gameState.money -= cost;
+            window.saveGameState(window.gameState);
+            window.renderApp(); 
+
+            const title = `Conseil du Maître Forgeron`;
+            openAIModal(title, "Le Maître Forgeron réfléchit à votre stratégie...");
+
+            // Formater l'état du jeu pour l'IA
+            const gridWeapons = window.gameState.grid.filter(w => w !== null).map(w => `${w.name} (Lv ${w.level})`).join(', ') || 'Aucune arme sur la grille.';
+            const inventoryWeapons = window.gameState.inventory.map(w => `${w.name} (Lv ${w.level})`).join(', ') || 'Inventaire vide.';
+            
+            const userQuery = `Voici l'état actuel de ma forge :
+                - Niveau du joueur: ${window.gameState.level}
+                - Argent disponible: ${window.gameState.money} 💰
+                - Armes sur la Grille (9 emplacements): ${gridWeapons}
+                - Armes dans l'Inventaire (${window.gameState.inventory.length}/${MAX_INVENTORY_SIZE}): ${inventoryWeapons}
+                
+                Donne-moi un conseil stratégique pour optimiser ma progression (fusionner, placer, ou améliorer). Sois direct et encourageant.`;
+            
+            const systemPrompt = "Tu es un Maître Forgeron légendaire et un mentor. Tu dois analyser la liste des armes et fournir un seul conseil stratégique clair et actionable pour aider le joueur à progresser ou à améliorer son score. Ta réponse doit être en français et ne doit pas dépasser trois phrases.";
+
+            const result = await fetchGeminiResponse(userQuery, systemPrompt);
+            document.getElementById('ai-modal-body').textContent = result;
+        };
+
+        // --- Utilitaires de Message/Toast ---
+        let messageTimeout;
+        const showMessage = (text) => {
+            const messageEl = document.getElementById('message-box');
+            if (!messageEl) return;
+            
+            messageEl.textContent = text;
+            messageEl.classList.remove('opacity-0', 'scale-90', 'hidden');
+            messageEl.classList.add('opacity-100', 'scale-100');
+            
+            clearTimeout(messageTimeout);
+            messageTimeout = setTimeout(() => {
+                messageEl.classList.remove('opacity-100', 'scale-100');
+                messageEl.classList.add('opacity-0', 'scale-90');
+                setTimeout(() => messageBox.classList.add('hidden'), 500);
+            }, 3000);
+        };
+
+        // --- Fonctions de Rendu de Vue ---
+
+        window.submitUserName = () => {
+            const input = document.getElementById('username-input');
+            const userName = input.value.trim();
+            if (userName.length < 2) {
+                showMessage("Le nom d'utilisateur doit contenir au moins 2 caractères.");
+                return;
+            }
+            window.gameState.userName = userName;
+            changeView('menu'); // Aller au menu principal après la saisie du nom
+        };
+
+        const changeView = (viewName, fromView = null) => {
+            if (viewName === 'game') {
+                if (!window.gameState.stats.spawnIntervalId) {
+                    window.startSpawnInterval();
+                }
+                // Spawn initial seulement si la grille ET l'inventaire sont vides
+                if (window.gameState.inventory.length === 0 && window.gameState.grid.every(slot => slot === null)) {
+                    spawnWeapon(1); 
+                    spawnWeapon(1); 
+                }
+            } else {
+                 stopSpawnInterval();
+            }
+            
+            window.gameState.view = viewName;
+            window.saveGameState(window.gameState);
+            
+            window.renderApp();
+        };
+
+        const renderNameInput = () => {
+            const theme = THEMES[window.gameState.currentTheme];
+            return `
+                <div class="flex flex-col items-center justify-center flex-grow p-8" style="background-color: ${theme.baseColor}; filter: ${theme.filter};">
+                    <h1 class="text-4xl font-extrabold ${theme.accentColorClass} mb-12 shadow-text">Bienvenue Forgeron!</h1>
+                    
+                    <div class="w-full max-w-xs mb-8">
+                        <label for="username-input" class="block text-white text-lg font-semibold mb-2">Entrez votre nom :</label>
+                        <input type="text" id="username-input" placeholder="Votre nom d'aventurier/ère"
+                               class="w-full p-3 rounded-lg bg-gray-700 text-white border border-gray-600 focus:ring-2 focus:ring-purple-500"
+                               value="${window.gameState.userName}" maxlength="20">
+                    </div>
+                    
+                    <button onclick="submitUserName()" class="w-full max-w-xs p-4 text-xl font-bold text-white bg-green-600 rounded-lg shadow-xl hover:bg-green-700 transition transform hover:scale-[1.02]">
+                        Commencer l'Aventure
+                    </button>
+                    
+                    <div class="mt-auto pt-4 w-full text-center">
+                        <p class="text-sm text-gray-500">Créateur: Enzo</p>
+                    </div>
+                </div>
+            `;
+        };
+
+        const renderMainMenu = () => {
+            const theme = THEMES[window.gameState.currentTheme];
+            return `
+                <div class="flex flex-col items-center justify-center flex-grow p-8" style="background-color: ${theme.baseColor}; filter: ${theme.filter};">
+                    <h1 class="text-4xl font-extrabold ${theme.accentColorClass} mb-2 shadow-text">Salut, ${window.gameState.userName}!</h1>
+                    <p class="text-sm text-gray-400 mb-10">Forge de l'Âme (Mode Solo Local)</p>
+                    
+                    <button onclick="changeView('game')" class="w-full max-w-xs p-4 mb-4 text-xl font-bold text-white bg-green-600 rounded-lg shadow-xl hover:bg-green-700 transition transform hover:scale-[1.02]">
+                        Démarrer/Reprendre la Forge
+                    </button>
+                    
+                    <button onclick="changeView('theme')" class="w-full max-w-xs p-3 mb-4 text-lg font-semibold text-white bg-yellow-600 rounded-lg shadow-md hover:bg-yellow-700 transition">
+                        Ambiance de la Forge (Thèmes)
+                    </button>
+                    
+                    <button onclick="changeView('settings')" class="w-full max-w-xs p-3 mb-6 text-lg font-semibold text-white bg-blue-600 rounded-lg shadow-md hover:bg-blue-700 transition">
+                        Paramètres (Luminosité)
+                    </button>
+                    
+                    <div class="mt-auto pt-4 w-full text-center">
+                        <p class="text-sm text-gray-500">Créateur: Enzo</p>
+                    </div>
+                </div>
+            `;
+        };
+        
+        const renderSettings = () => {
+            const theme = THEMES[window.gameState.currentTheme];
+            return `
+                <div class="p-6 flex flex-col flex-grow" style="background-color: ${theme.baseColor}; filter: ${theme.filter};">
+                    <div class="flex justify-between items-center mb-6 border-b border-gray-700 pb-3">
+                        <h2 class="text-3xl font-bold text-white">Paramètres Visuels</h2>
+                        <button onclick="changeView('menu')" class="p-2 bg-red-600 text-white rounded-full hover:bg-red-700 transition shadow-lg">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-home"><path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+                        </button>
+                    </div>
+                    
+                    <div class="mb-8">
+                        <label for="brightness-slider" class="text-lg font-semibold text-white block mb-2">Luminosité (Sensibilité Visuelle)</label>
+                        <input type="range" id="brightness-slider" min="50" max="200" step="10" value="${window.gameState.brightness}" 
+                               oninput="updateBrightness(parseInt(this.value))"
+                               class="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer range-lg">
+                        <div class="text-sm text-gray-400 mt-1">${window.gameState.brightness}%</div>
+                    </div>
+
+                    <div class="flex-grow"></div>
+                </div>
+            `;
+        };
+        
+        // --- Rendu du Sélecteur de Thèmes (City/Cité) ---
+        const renderThemeSelector = () => {
+             const theme = THEMES[window.gameState.currentTheme];
+             const currentThemeId = window.gameState.currentTheme;
+
+            return `
+                <div class="p-6 flex flex-col flex-grow" style="background-color: ${theme.baseColor}; filter: ${theme.filter};">
+                    <div class="flex justify-between items-center mb-6 border-b border-gray-700 pb-3">
+                        <h2 class="text-3xl font-bold text-white">Ambiance de la Forge</h2>
+                        <button onclick="changeView('menu')" class="p-2 bg-red-600 text-white rounded-full hover:bg-red-700 transition shadow-lg">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-home"><path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+                        </button>
+                    </div>
+                    
+                    <p class="text-sm text-gray-400 mb-6">Choisissez le thème visuel de votre environnement de forge.</p>
+
+                    <div class="grid grid-cols-2 gap-4 overflow-y-auto flex-grow pb-4">
+                        ${Object.entries(THEMES).map(([id, themeData]) => `
+                            <button onclick="setTheme('${id}')" 
+                                class="p-4 rounded-xl shadow-lg border-2 transition transform hover:scale-[1.02] 
+                                ${currentThemeId === id ? 'border-4 border-yellow-400 bg-gray-700' : 'border-gray-500 bg-gray-800'}"
+                                style="background-color: ${themeData.baseColor.replace('0.9', '0.7')}; filter: ${themeData.filter};">
+                                <span class="block text-xl font-bold mb-1 ${themeData.accentColorClass}">${themeData.name}</span>
+                                ${currentThemeId === id ? '<span class="text-xs text-yellow-300 font-semibold">ACTIF</span>' : '<span class="text-xs text-gray-400">Choisir</span>'}
+                            </button>
+                        `).join('')}
+                    </div>
+                </div>
+            `;
+        };
+        
+        const renderWeaponItem = (weapon, index, isInventory) => {
+            if (!weapon) return `<div class="grid-slot p-2 bg-gray-800 rounded-md flex items-center justify-center" data-index="${index}"></div>`;
+            
+            const source = isInventory ? 'inventory' : index;
+            const indexValue = isInventory ? 'inventory' : index;
+            
+            const loreExists = window.gameState.aiAnalysisHistory[weapon.id];
+            
+            // Le bouton Lore est seulement sur les armes dans l'inventaire
+            const loreButton = !isInventory ? '' : `
+                <button onclick="generateWeaponLore('${weapon.id}')" 
+                        class="ai-button absolute bottom-0 right-0 p-1 rounded-tr-none rounded-bl-lg rounded-tl-sm rounded-br-lg text-xs hover:scale-[1.05] transition-transform z-10 
+                        ${loreExists ? 'bg-yellow-600 text-gray-900 shadow-yellow-800' : 'bg-purple-600 text-white shadow-purple-800'}">
+                    ✨
+                </button>
+            `;
+
+            return `
+                <div class="weapon-item grid-slot ${weapon.bg} rounded-xl shadow-lg border-2 border-gray-600 flex flex-col items-center justify-center p-2 relative ${weapon.color} text-center transition" 
+                     data-id="${weapon.id}" 
+                     data-level="${weapon.level}"
+                     data-index="${index}"
+                     onmousedown="startDrag(event, '${weapon.id}', '${source}', '${indexValue}')" 
+                     ontouchstart="startDrag(event, '${weapon.id}', '${source}', '${indexValue}')">
+                    <div class="text-6xl mb-1">${weapon.icon}</div> 
+                    <div class="text-xs font-bold whitespace-nowrap overflow-hidden text-ellipsis">${weapon.name}</div>
+                    <div class="text-[10px] ${weapon.color.replace('400', '200')} font-medium">${weapon.rarity} Lv.${weapon.level}</div>
+                    ${loreButton}
+                </div>
+            `;
+        };
+        
+        const renderInventory = (inventory) => {
+            const emptySlots = MAX_INVENTORY_SIZE - inventory.length;
+            const inventoryHtml = inventory.map(weapon => renderWeaponItem(weapon, 'inventory', true)).join('');
+            const emptySlotsHtml = Array(emptySlots).fill(null).map((_, index) => `<div class="inventory-slot p-2 bg-gray-700 rounded-md flex items-center justify-center text-gray-500 text-lg">vide</div>`).join('');
+
+            return `
+                <div class="flex space-x-2 overflow-x-auto p-2">
+                    ${inventoryHtml}
+                    ${emptySlotsHtml}
+                </div>
+            `;
+        };
+        
+
+        const renderGame = () => {
+            const { userName, level, xp, xpToNextLevel, money, grid, inventory } = window.gameState;
+            const xpPercent = Math.min(100, (xp / xpToNextLevel) * 100);
+            const theme = THEMES[window.gameState.currentTheme];
+
+            return `
+                <div class="flex flex-col flex-grow overflow-hidden p-3 pt-4" style="background-color: ${theme.baseColor}; filter: ${theme.filter};">
+                    <!-- Barre Supérieure : Nom, Niveau, XP, Argent et Boutons de navigation -->
+                    <div class="flex flex-col mb-4">
+                        <div class="flex justify-between items-start mb-2">
+                            <h1 class="text-xl font-bold text-white">Forge de ${userName}</h1>
+                            <div class="flex items-center space-x-2">
+                                <!-- Bouton Conseil Maître Forgeron -->
+                                <button onclick="getMentorAdvice()" 
+                                        class="p-2 bg-yellow-600 text-gray-900 rounded-full text-sm font-semibold shadow-md hover:bg-yellow-700 transition"
+                                        title="Conseil stratégique du Maître Forgeron (75 💰)">
+                                    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-award"><circle cx="12" cy="8" r="7"/><polyline points="8.21 13.89 7 23 12 20 17 23 15.79 13.88"/></svg>
+                                </button>
+                                <!-- Bouton Ambiance (remplace Musique) -->
+                                <button onclick="changeView('theme')" class="p-2 bg-yellow-600 text-gray-900 rounded-full text-sm font-semibold shadow-md hover:bg-yellow-700 transition" title="Ambiance/Thèmes">
+                                    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-brush"><path d="m9.06 11.95 2.87 2.87c.37-.3.74-.75 1.05-1.16l2.96-3.79c.14-.17.21-.4.21-.63a.62.62 0 0 0-.62-.62c-.22 0-.44.07-.63.21l-3.79 2.96c-.41.31-.86.68-1.16 1.05z"/><path d="M12.5 1.5a1.5 1.5 0 0 0-1.5 1.5v3a1.5 1.5 0 0 0 1.5 1.5h.5a1.5 1.5 0 0 0 1.5-1.5v-3a1.5 1.5 0 0 0-1.5-1.5z"/><path d="M14.5 7.5a1.5 1.5 0 0 0 1.5-1.5v-3a1.5 1.5 0 0 0-1.5-1.5h-.5a1.5 1.5 0 0 0-1.5 1.5v3a1.5 1.5 0 0 0 1.5 1.5z"/><path d="M17 19.5a1.5 1.5 0 0 0 1.5-1.5v-3a1.5 1.5 0 0 0-1.5-1.5h-10a1.5 1.5 0 0 0-1.5 1.5v3a1.5 1.5 0 0 0 1.5 1.5z"/></svg>
+                                </button>
+                                <!-- Bouton Menu Principal (Paramètres) -->
+                                <button onclick="changeView('menu')" class="p-2 bg-red-600 text-white rounded-full text-sm font-semibold shadow-md hover:bg-red-700 transition">
+                                    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-menu"><line x1="4" x2="20" y1="12" y2="12"/><line x1="4" x2="20" y1="6" y2="6"/><line x1="4" x2="20" y1="18" y2="18"/></svg>
+                                </button>
+                            </div>
+                        </div>
+                        <div class="flex justify-between items-center ${theme.accentColorClass} font-bold text-lg mb-2">
+                            <span>Niveau ${level}</span>
+                            <span>💰 ${money}</span>
+                        </div>
+                        <div class="w-full bg-gray-700 rounded-full h-2.5">
+                            <div class="bg-yellow-500 h-2.5 rounded-full transition-all duration-300" style="width: ${xpPercent}%"></div>
+                        </div>
+                        <div class="text-[10px] text-gray-400 mt-0.5">${xp} / ${xpToNextLevel} XP</div>
+                    </div>
+
+                    <!-- Grille de Jeu (Le Carré) -->
+                    <div class="flex justify-center items-center p-2 bg-gray-900 rounded-2xl shadow-inner mb-4">
+                        <div id="game-grid-container" class="game-grid w-full">
+                            ${grid.map((weapon, index) => renderWeaponItem(weapon, index, false)).join('')}
+                        </div>
+                    </div>
+
+                    <!-- Zone d'Inventaire (Armes à déposer) -->
+                    <div class="mt-auto p-3 bg-gray-800 rounded-xl shadow-inner">
+                        <div class="flex justify-between items-center mb-2">
+                            <h3 class="text-white font-semibold">Inventaire (${inventory.length}/${MAX_INVENTORY_SIZE})</h3>
+                            <button onclick="analyzeLastWeapon()" 
+                                    class="ai-button p-2 text-xs bg-purple-700 text-white rounded-lg hover:bg-purple-800"
+                                    title="Analyse de la dernière arme fusionnée (50 💰)">
+                                ANALYSE (50 💰)
+                            </button>
+                        </div>
+                        ${renderInventory(inventory)}
+                    </div>
+
+                    <!-- Message Box (Toast) -->
+                    <div id="message-box" class="hidden fixed bottom-16 left-1/2 transform -translate-x-1/2 p-3 bg-indigo-600 text-white rounded-lg shadow-xl text-sm font-semibold transition-all duration-500 opacity-0 scale-90 z-50">
+                        Message test
+                    </div>
+                </div>
+            `;
+        };
+        
+        // --- Fonction Principale de Rendu de l'Application ---
+        
+        const renderAppContent = () => {
+            switch (window.gameState.view) {
+                case 'name_input':
+                    return renderNameInput();
+                case 'menu':
+                    return renderMainMenu();
+                case 'game':
+                    return renderGame();
+                case 'settings':
+                    return renderSettings();
+                case 'theme':
+                    return renderThemeSelector(); 
+                default:
+                    return `<div class="flex-grow flex items-center justify-center text-white text-lg">Vue inconnue: ${window.gameState.view}</div>`;
+            }
+        };
+
+        window.renderApp = () => {
+            const appElement = document.getElementById('app');
+            const theme = THEMES[window.gameState.currentTheme];
+            
+            // Applique le background du thème et le filtre de luminosité au conteneur principal
+            appElement.className = `app-container ${theme.bgClass}`;
+            appElement.style.backgroundColor = theme.baseColor; 
+            appElement.style.filter = `brightness(${window.gameState.brightness}%) ${theme.filter}`;
+
+            appElement.innerHTML = renderAppContent();
+        };
+
+        // Appel INITIAL pour démarrer l'application (chargement de localStorage).
+        window.loadAndListen();
+
+    </script>
+</body>
+</html>
