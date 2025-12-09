@@ -1,0 +1,785 @@
+// Définition des constantes et variables globales
+const WEAPONS = [
+    { level: 1, name: "Épée de Fer", emoji: "🗡️", color: "text-gray-400", nextLevel: 2 },
+    { level: 2, name: "Épée de Bronze", emoji: "⚔️", color: "text-amber-500", nextLevel: 3 },
+    { level: 3, name: "Glaive de Néon", emoji: "✨", color: "text-lime-400", nextLevel: 4 },
+    { level: 4, name: "Hache Quantique", emoji: "🪓", color: "text-cyan-400", nextLevel: 5 },
+    { level: 5, name: "Marteau Stellaire", emoji: "🔨", color: "text-fuchsia-500", nextLevel: 6 },
+    { level: 6, name: "Lame Solaire", emoji: "🔥", color: "text-orange-500", nextLevel: 7 },
+    { level: 7, name: "Lance Cosmique", emoji: "🔱", color: "text-sky-400", nextLevel: 8 },
+    { level: 8, name: "Arme Finale", emoji: "👑", color: "text-yellow-300", nextLevel: 9 },
+    { level: 9, name: "Arme Zénith", emoji: "🔮", color: "text-purple-400", nextLevel: 10 },
+    { level: 10, name: "Arme ULTIME", emoji: "💫", color: "text-red-400", nextLevel: 10 },
+];
+
+// Taille maximale de l'inventaire source (pour le remplissage)
+const INVENTORY_SIZE = 5;
+
+let state = {
+    playerName: localStorage.getItem('playerName') || '',
+    grid: Array(9).fill(null), // La grille de jeu 3x3 (où les armes sont stockées)
+    inventory: [], // Inventaire source auto-rempli
+    unlockedWeapons: { 1: true }, // Armes découvertes (Niveau 1 toujours débloqué)
+    currentTheme: localStorage.getItem('gameTheme') || 'theme-neon',
+    view: 'start', // 'start', 'game', 'settings', 'index'
+    isAuthReady: false,
+    userId: null,
+};
+
+// Variables Firebase
+let db, auth;
+// Ces variables sont fournies par l'environnement Canvas et sont MANDATOIRES pour la persistance
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
+const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+// État du glissement (pour la gestion tactile et native)
+let draggedItem = null;
+let originalSource = { location: null, index: -1, level: -1 }; // D'où vient l'arme
+let dragContainer = document.getElementById('drag-container');
+
+// --- Fonctions d'Initialisation et de Navigation ---
+
+function initFirebase() {
+    if (!firebaseConfig) {
+        console.error("Configuration Firebase non disponible.");
+        return;
+    }
+    try {
+        // window.firebase.setLogLevel('Debug'); // Décommenter pour le débogage Firestore
+        const app = window.firebase.initializeApp(firebaseConfig);
+        auth = window.firebase.getAuth(app);
+        db = window.firebase.getFirestore(app);
+
+        window.firebase.onAuthStateChanged(auth, async (user) => {
+            if (user) {
+                state.userId = user.uid;
+            } else {
+                // Connexion anonyme si le token n'est pas fourni
+                if (initialAuthToken) {
+                    await window.firebase.signInWithCustomToken(auth, initialAuthToken);
+                    state.userId = auth.currentUser.uid;
+                } else {
+                    await window.firebase.signInAnonymously(auth);
+                    state.userId = auth.currentUser.uid;
+                }
+            }
+            state.isAuthReady = true;
+            document.getElementById('displayUserId').textContent = `ID Utilisateur: ${state.userId}`;
+
+            // Après l'authentification, on charge les données si le nom est déjà saisi
+            if (state.playerName) {
+               await loadGame();
+            }
+
+            renderView(state.view); // Rendu initial après l'authentification
+        });
+
+    } catch (error) {
+        console.error("Erreur d'initialisation de Firebase:", error);
+    }
+}
+
+// Fonction pour changer le thème (visuel du jeu)
+function applyTheme(themeName) {
+    document.body.className = document.body.className.split(' ').filter(c => !c.startsWith('theme-')).join(' ');
+    document.body.classList.add(themeName);
+    state.currentTheme = themeName;
+    localStorage.setItem('gameTheme', themeName);
+}
+
+// Affiche la vue appropriée et déclenche le rendu du jeu
+function renderView(view) {
+    ['startScreen', 'gameScreen', 'settingsScreen', 'indexScreen'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.classList.add('hidden');
+    });
+
+    const targetScreen = document.getElementById(`${view}Screen`);
+    if (targetScreen) targetScreen.classList.remove('hidden');
+
+    if (view === 'start') {
+        checkPlayerNameForPlayButton();
+    } else if (view === 'game') {
+        refillInventory();
+        renderGrid();
+        renderInventory();
+        const displayNameEl = document.getElementById('displayPlayerName');
+        if (displayNameEl) displayNameEl.textContent = state.playerName;
+    } else if (view === 'settings') {
+        const settingsNameEl = document.getElementById('settingsPlayerName');
+        if (settingsNameEl) settingsNameEl.value = state.playerName;
+    } else if (view === 'index') {
+        renderWeaponIndex();
+    }
+    state.view = view;
+}
+
+// --- Fonctions de Sauvegarde et Chargement (Firestore) ---
+
+function getSaveDocRef() {
+    if (!state.userId || !db) return null;
+    // Chemin de sauvegarde dans Firestore: /artifacts/{appId}/users/{userId}/game_saves/weapon_merger
+    return window.firebase.doc(db,
+        `artifacts/${appId}/users/${state.userId}/game_saves`,
+        'weapon_merger'
+    );
+}
+
+async function saveGame() {
+    if (!state.isAuthReady || !state.userId || !db) return;
+
+    const saveDocRef = getSaveDocRef();
+    if (!saveDocRef) {
+        console.error("Impossible de sauvegarder : Firebase ou utilisateur non prêt.");
+        return;
+    }
+
+    const saveStatusEl = document.getElementById('saveStatus') || { textContent: '' };
+    saveStatusEl.textContent = "Sauvegarde en cours...";
+
+    try {
+        // Sauvegarder seulement le niveau pour les armes sur la grille
+        const gridData = state.grid.map(item => item ? { level: item.level } : null);
+        // Convertir les clés de unlockedWeapons en nombres avant la sauvegarde
+        const unlockedLevels = Object.keys(state.unlockedWeapons).map(Number).filter(n => n > 0);
+
+        await window.firebase.setDoc(saveDocRef, {
+            playerName: state.playerName,
+            grid: gridData,
+            unlockedLevels: unlockedLevels,
+            lastSave: new Date().toISOString(),
+        });
+        saveStatusEl.textContent = `Sauvegardé avec succès! (${new Date().toLocaleTimeString()})`;
+    } catch (error) {
+        console.error("Erreur de sauvegarde Firestore:", error);
+        saveStatusEl.textContent = "Échec de la sauvegarde.";
+    }
+}
+
+async function loadGame() {
+    if (!state.isAuthReady || !state.userId || !db) return;
+
+    const saveDocRef = getSaveDocRef();
+    if (!saveDocRef) return;
+
+    try {
+        const docSnap = await window.firebase.getDoc(saveDocRef);
+
+        if (docSnap.exists()) {
+            const data = docSnap.data();
+
+            if (!state.playerName || state.playerName === 'Héros') {
+                state.playerName = data.playerName || 'Héros';
+                localStorage.setItem('playerName', state.playerName);
+            }
+
+            state.grid = data.grid || Array(9).fill(null);
+            state.grid = state.grid.map(item => item && item.level ? { level: item.level } : null);
+
+            state.unlockedWeapons = {};
+            (data.unlockedLevels || [1]).forEach(level => {
+                state.unlockedWeapons[level] = true;
+            });
+
+            const playerNameEl = document.getElementById('playerName');
+            if (playerNameEl) playerNameEl.value = state.playerName;
+            
+            const statusMessageEl = document.getElementById('statusMessage');
+            if (statusMessageEl) statusMessageEl.textContent = `Partie chargée : Bienvenue ${state.playerName}! Dernière sauvegarde : ${new Date(data.lastSave).toLocaleTimeString()}`;
+
+        } else {
+            console.log("Aucune sauvegarde trouvée, utilisant l'état initial.");
+            saveGame();
+        }
+    } catch (error) {
+        console.error("Erreur de chargement Firestore:", error);
+        const statusMessageEl = document.getElementById('statusMessage');
+        if (statusMessageEl) statusMessageEl.textContent = "Erreur de chargement. État initial utilisé.";
+    }
+}
+
+// --- Logique d'Inventaire (Rareté/Pondération) ---
+
+/**
+ * Choisit un niveau d'arme débloqué de manière pondérée.
+ */
+function getRandomWeightedWeaponLevel() {
+    const availableLevels = Object.keys(state.unlockedWeapons).map(Number).filter(n => n > 0);
+
+    if (availableLevels.length === 0) return 1; // Fallback
+    if (availableLevels.length === 1 && availableLevels[0] === 1) return 1;
+
+    let weightedLevels = [];
+    let totalWeight = 0;
+
+    // Calculer les poids. Plus le niveau est élevé, plus le poids est faible.
+    availableLevels.forEach(level => {
+        let weight;
+
+        if (level === 1) {
+            weight = 8; // Très fréquent
+        } else if (level === 2) {
+            weight = 2; // Fréquent
+        } else if (level <= 4) {
+            weight = 1; // Normal
+        } else if (level <= 6) {
+            weight = 0.5; // Rare
+        } else {
+            weight = 0.2; // Très rare
+        }
+
+        totalWeight += weight;
+        weightedLevels.push({ level, weight });
+    });
+
+    let random = Math.random() * totalWeight;
+    let currentWeight = 0;
+
+    for (let item of weightedLevels) {
+        currentWeight += item.weight;
+        if (random < currentWeight) {
+            return item.level;
+        }
+    }
+
+    return 1; // Retour par défaut si quelque chose ne va pas
+}
+
+// Fonction pour remplir l'inventaire source avec des armes pondérées
+function refillInventory() {
+    state.inventory = [];
+
+    for (let i = 0; i < INVENTORY_SIZE; i++) {
+        const randomLevel = getRandomWeightedWeaponLevel();
+        if (randomLevel) {
+             state.inventory.push({ level: randomLevel });
+        } else {
+            state.inventory.push(null);
+        }
+    }
+}
+
+// --- Fonctions de Rendu du Jeu ---
+
+function getWeapon(level) {
+    return WEAPONS.find(w => w.level === level) || null;
+}
+
+function createWeaponElement(weaponData, location, index) {
+    if (!weaponData) return null;
+    const weapon = getWeapon(weaponData.level);
+    if (!weapon) return null;
+
+    const sizeClass = (location === 'inventory') ? 'text-3xl p-2' : 'text-5xl';
+    const locationClass = (location === 'inventory') ? 'inventory-item' : 'grid-cell-content';
+
+    const element = document.createElement('div');
+    element.className = `${locationClass} ${weapon.color} font-extrabold ${sizeClass} transition-transform duration-100 ease-in-out`;
+    element.dataset.level = weapon.level;
+    element.dataset.index = index;
+    element.dataset.location = location;
+    element.draggable = true;
+    element.innerHTML = weapon.emoji;
+
+    // Attacher les événements de glisser/toucher
+    element.addEventListener('dragstart', startNativeDrag);
+    element.addEventListener('touchstart', startTouchDrag, { passive: false });
+
+    return element;
+}
+
+function renderGrid() {
+    const gridEl = document.getElementById('fusionGrid');
+    if (!gridEl) return;
+    gridEl.innerHTML = '';
+
+    state.grid.forEach((weaponData, index) => {
+        const cell = document.createElement('div');
+        cell.className = 'grid-cell flex items-center justify-center rounded-lg';
+        cell.dataset.index = index;
+        // Attacher les événements de dépôt aux cellules de la grille
+        cell.addEventListener('drop', onDrop);
+        cell.addEventListener('dragover', onDragOver);
+
+        if (weaponData) {
+            const weaponEl = createWeaponElement(weaponData, 'grid', index);
+            if (weaponEl) cell.appendChild(weaponEl);
+        }
+
+        gridEl.appendChild(cell);
+    });
+}
+
+function renderInventory() {
+    const inventoryEl = document.getElementById('inventory');
+    if (!inventoryEl) return;
+    inventoryEl.innerHTML = '';
+
+    state.inventory.forEach((weaponData, index) => {
+        const wrapper = document.createElement('div');
+        wrapper.className = 'inventory-cell w-16 h-16 flex items-center justify-center rounded-lg bg-gray-700 hover:bg-gray-600 transition';
+
+        if (weaponData) {
+            const weaponEl = createWeaponElement(weaponData, 'inventory', index);
+            if (weaponEl) wrapper.appendChild(weaponEl);
+        }
+
+        wrapper.dataset.index = index;
+        wrapper.addEventListener('drop', onDropToInventory);
+        wrapper.addEventListener('dragover', onDragOver);
+
+        inventoryEl.appendChild(wrapper);
+    });
+}
+
+function renderWeaponIndex() {
+    const indexListEl = document.getElementById('weaponIndexList');
+    if (!indexListEl) return;
+    indexListEl.innerHTML = '';
+
+    WEAPONS.forEach(weapon => {
+        const isUnlocked = state.unlockedWeapons[weapon.level];
+
+        const itemEl = document.createElement('div');
+        itemEl.className = `p-3 flex items-center space-x-4 rounded-lg border-l-4 ${isUnlocked ? 'border-cyan-500 bg-gray-700' : 'border-gray-500 bg-gray-800 opacity-50'}`;
+
+        const status = isUnlocked ? 'Débloqué' : '???';
+
+        itemEl.innerHTML = `
+            <span class="text-3xl ${weapon.color}">${isUnlocked ? weapon.emoji : '❓'}</span>
+            <div>
+                <p class="text-lg font-bold ${isUnlocked ? 'text-white' : 'text-gray-400'}">${weapon.name}</p>
+                <p class="text-xs text-gray-500">Niveau: ${weapon.level} - ${status}</p>
+            </div>
+        `;
+        indexListEl.appendChild(itemEl);
+    });
+}
+
+// --- Logique de Jeu ---
+
+function mergeWeapons(level) {
+    const nextLevel = getWeapon(level)?.nextLevel;
+    if (nextLevel && nextLevel <= WEAPONS.length) {
+        // Débloquer le nouveau niveau dans le stock infini
+        state.unlockedWeapons[nextLevel] = true;
+        return getWeapon(nextLevel);
+    }
+    return null;
+}
+
+// --- Logique de Glisser-Déposer (Drag & Drop) ---
+
+// --- 1. Glisser Natif (pour Desktop) ---
+function startNativeDrag(e) {
+    const target = e.currentTarget;
+    originalSource.index = parseInt(target.dataset.index);
+    originalSource.location = target.dataset.location;
+    originalSource.level = parseInt(target.dataset.level);
+
+    if (e.dataTransfer) {
+        e.dataTransfer.setData('text/plain', JSON.stringify(originalSource));
+        e.dataTransfer.setDragImage(target, 30, 30);
+    }
+
+    setTimeout(() => target.style.opacity = '0', 0);
+}
+
+function onDragOver(e) {
+    e.preventDefault();
+}
+
+// Dépôt sur une cellule de la GRILLE
+function onDrop(e) {
+    e.preventDefault();
+
+    let sourceData;
+    try {
+        sourceData = JSON.parse(e.dataTransfer.getData('text/plain'));
+    } catch (err) {
+        // Pour le tactile, l'originalSource est déjà défini
+        sourceData = originalSource;
+    }
+
+    const cellEl = e.currentTarget.closest('.grid-cell');
+    if (!cellEl) return;
+    const targetIndex = parseInt(cellEl.dataset.index);
+
+    handleDropToGrid(sourceData, targetIndex);
+
+    if (sourceData.location === 'grid') {
+        const originalElement = document.querySelector(`.grid-cell-content[data-index="${sourceData.index}"]`);
+        if (originalElement) originalElement.style.opacity = '1';
+    }
+
+    // --- MISE À JOUR VISUELLE UNIFIÉE ET SAUVEGARDE ---
+    refillInventory();
+    renderGrid();
+    renderInventory();
+    saveGame();
+}
+
+// Dépôt sur une cellule de l'INVENTAIRE (pour remettre une arme de la grille)
+function onDropToInventory(e) {
+    e.preventDefault();
+
+    let sourceData;
+    try {
+        sourceData = JSON.parse(e.dataTransfer.getData('text/plain'));
+    } catch (err) {
+         sourceData = originalSource;
+    }
+
+    if (sourceData.location !== 'grid') {
+        const statusMessageEl = document.getElementById('statusMessage');
+        if (statusMessageEl) statusMessageEl.textContent = "Seules les armes de la grille peuvent être retirées.";
+        return;
+    }
+
+    state.grid[sourceData.index] = null;
+
+    const statusMessageEl = document.getElementById('statusMessage');
+    if (statusMessageEl) statusMessageEl.textContent = `Arme ${getWeapon(sourceData.level)?.name} retirée de la grille.`;
+
+    // --- MISE À JOUR VISUELLE UNIFIÉE ET SAUVEGARDE ---
+    refillInventory();
+    renderGrid();
+    renderInventory();
+    saveGame();
+}
+
+// --- 2. Glisser Tactile (pour Mobile - simulation) ---
+
+function getCoords(e) {
+    if (e.touches && e.touches.length > 0) {
+        return { x: e.touches[0].clientX, y: e.touches[0].clientY };
+    }
+    return { x: e.clientX, y: e.clientY };
+}
+
+function startTouchDrag(e) {
+    e.preventDefault();
+
+    let itemWrapper = e.currentTarget;
+
+    originalSource.index = parseInt(itemWrapper.dataset.index);
+    originalSource.location = itemWrapper.dataset.location;
+    originalSource.level = parseInt(itemWrapper.dataset.level);
+
+    draggedItem = itemWrapper.cloneNode(true);
+
+    itemWrapper.style.opacity = '0.5';
+
+    const dragContent = draggedItem.querySelector('.weapon-item, .grid-cell-content') || draggedItem;
+
+    dragContent.classList.remove('transition-transform');
+    dragContent.style.transform = 'scale(1.2)';
+    dragContent.classList.add('absolute', 'neon-shadow', 'bg-gray-700', 'rounded-lg', 'p-2');
+
+    dragContainer.innerHTML = '';
+    dragContainer.appendChild(dragContent);
+    dragContainer.classList.remove('hidden');
+
+    const { x, y } = getCoords(e);
+    const rect = itemWrapper.getBoundingClientRect();
+    const offsetX = rect.width / 2;
+    const offsetY = rect.height / 2;
+
+    dragContent.style.width = `${rect.width}px`;
+    dragContent.style.height = `${rect.height}px`;
+
+    updateDragPosition(x, y, offsetX, offsetY);
+
+    document.addEventListener('touchmove', onTouchDrag, { passive: false });
+    document.addEventListener('touchend', endTouchDrag);
+    document.addEventListener('touchcancel', endTouchDrag);
+}
+
+function updateDragPosition(x, y, offsetX, offsetY) {
+    if (draggedItem) {
+        draggedItem.style.transform = `translate3d(${x - offsetX}px, ${y - offsetY}px, 0) scale(1.2)`;
+    }
+}
+
+function onTouchDrag(e) {
+    e.preventDefault();
+    const { x, y } = getCoords(e);
+
+    const offsetX = draggedItem ? parseInt(draggedItem.style.width) / 2 : 0;
+    const offsetY = draggedItem ? parseInt(draggedItem.style.height) / 2 : 0;
+
+    updateDragPosition(x, y, offsetX, offsetY);
+}
+
+function endTouchDrag(e) {
+    e.preventDefault();
+
+    if (!draggedItem || originalSource.index === -1) {
+         dragContainer.classList.add('hidden');
+         return;
+    }
+
+    document.removeEventListener('touchmove', onTouchDrag);
+    document.removeEventListener('touchend', endTouchDrag);
+    document.removeEventListener('touchcancel', endTouchDrag);
+
+    const originalElement = document.querySelector(`[data-location="${originalSource.location}"][data-index="${originalSource.index}"]`);
+    if (originalElement) originalElement.style.opacity = '1';
+
+    dragContainer.classList.add('hidden');
+
+    let lastTouch = e.changedTouches ? e.changedTouches[0] : null;
+    const x = lastTouch ? lastTouch.clientX : 0;
+    const y = lastTouch ? lastTouch.clientY : 0;
+
+    let dropTarget = null;
+    let targetType = null;
+    const statusMessageEl = document.getElementById('statusMessage');
+
+
+    // 1. Vérification des cellules de la GRILLE
+    const gridCells = document.querySelectorAll('#fusionGrid .grid-cell');
+    gridCells.forEach(cell => {
+        const rect = cell.getBoundingClientRect();
+        if (x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom) {
+            dropTarget = cell;
+            targetType = 'grid';
+        }
+    });
+
+    // 2. Vérification de l'INVENTAIRE
+    if (!dropTarget) {
+         const inventoryEl = document.getElementById('inventory');
+         const container = inventoryEl ? inventoryEl.closest('.w-full.mt-4.p-3.bg-gray-800') : null;
+         const rect = container ? container.getBoundingClientRect() : null;
+         if (rect && x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom) {
+             dropTarget = inventoryEl;
+             targetType = 'inventory';
+         }
+    }
+
+
+    if (dropTarget) {
+
+        if (targetType === 'grid') {
+            const targetIndex = parseInt(dropTarget.dataset.index);
+            handleDropToGrid(originalSource, targetIndex);
+        } else if (targetType === 'inventory' && originalSource.location === 'grid') {
+            // C'est un retour vers l'inventaire depuis la grille
+            state.grid[originalSource.index] = null;
+            if (statusMessageEl) statusMessageEl.textContent = `Arme ${getWeapon(originalSource.level)?.name} retirée de la grille.`;
+        } else {
+            if (statusMessageEl) statusMessageEl.textContent = "Déplacement non valide. Arme retournée à sa source.";
+        }
+
+    } else {
+        if (statusMessageEl) statusMessageEl.textContent = "Arme retournée à sa source (zone de dépôt non valide).";
+    }
+
+    // --- MISE À JOUR VISUELLE UNIFIÉE ET SAUVEGARDE ---
+    refillInventory();
+    renderGrid();
+    renderInventory();
+    saveGame();
+
+    // Nettoyer l'état
+    draggedItem = null;
+    originalSource = { location: null, index: -1, level: -1 };
+}
+
+// Fonction unique pour gérer la logique de dépôt sur la GRILLE
+function handleDropToGrid(sourceData, targetIndex) {
+    const itemLevel = sourceData.level;
+    const targetWeapon = state.grid[targetIndex];
+    const statusMessageEl = document.getElementById('statusMessage');
+
+    let resultMessage = "";
+
+    if (sourceData.location === 'grid' && sourceData.index === targetIndex) {
+        resultMessage = "Aucun mouvement détecté.";
+        if (statusMessageEl) statusMessageEl.textContent = resultMessage;
+        return;
+    }
+
+    if (targetWeapon) {
+        // Cible non vide
+        if (targetWeapon.level === itemLevel) {
+            // --- FUSION RÉUSSIE ---
+            const newWeapon = mergeWeapons(itemLevel);
+
+            if (!newWeapon) {
+                 resultMessage = "FUSION IMPOSSIBLE : Niveau maximum atteint.";
+                 if (statusMessageEl) statusMessageEl.textContent = resultMessage;
+                 return;
+            }
+
+            // 1. Libérer l'emplacement source (si ce n'est pas l'inventaire qui est infini)
+            if (sourceData.location === 'grid') {
+                state.grid[sourceData.index] = null;
+            }
+
+            // 2. Placer le résultat dans l'emplacement cible
+            state.grid[targetIndex] = { level: newWeapon.level };
+
+            if (itemLevel === newWeapon.level) {
+                 resultMessage = `FUSION IMPOSSIBLE : Niveau maximum atteint (${newWeapon.name}).`;
+            } else {
+                 resultMessage = `FUSION RÉUSSIE! ${getWeapon(itemLevel)?.name} + ${getWeapon(itemLevel)?.name} = ${newWeapon.name}. Le niveau ${newWeapon.level} est maintenant disponible dans le stock infini.`;
+            }
+
+        } else if (sourceData.location === 'grid') {
+            // --- DÉPLACEMENT AVEC ÉCHANGE DE PLACE ---
+            const sourceWeapon = state.grid[sourceData.index];
+
+            state.grid[targetIndex] = sourceWeapon;
+            state.grid[sourceData.index] = targetWeapon;
+
+            resultMessage = `Armes échangées entre l'emplacement ${sourceData.index + 1} et ${targetIndex + 1}.`;
+
+        } else {
+            // --- FUSION ÉCHOUÉE DE L'INVENTAIRE SUR LA GRILLE ---
+            resultMessage = "FUSION ÉCHOUÉE! Les niveaux sont différents. L'arme de l'inventaire retourne dans le pool.";
+            if (statusMessageEl) statusMessageEl.textContent = resultMessage;
+            return;
+        }
+
+    } else {
+        // Cible vide (PLACEMENT ou DÉPLACEMENT SIMPLE)
+
+        // 1. Vider l'ancienne position (si ce n'est pas l'inventaire qui est infini)
+        if (sourceData.location === 'grid') {
+            state.grid[sourceData.index] = null;
+        }
+
+        // 2. Placer l'arme à la nouvelle position
+        state.grid[targetIndex] = { level: itemLevel };
+
+        resultMessage = `Arme ${getWeapon(itemLevel)?.name} placée dans l'emplacement ${targetIndex + 1}.`;
+    }
+
+    if (statusMessageEl) statusMessageEl.textContent = resultMessage;
+}
+
+// --- Fonctions de Validation et Mise à Jour du Nom ---
+async function checkPlayerNameForPlayButton() {
+    const playerNameInput = document.getElementById('playerName');
+    const playBtn = document.getElementById('playBtn');
+
+    if (!playerNameInput || !playBtn) return;
+
+    const playerName = playerNameInput.value.trim();
+
+    if (playerName.length > 0) {
+        playBtn.classList.remove('hidden');
+
+        if (state.playerName !== playerName) {
+            state.playerName = playerName;
+            localStorage.setItem('playerName', state.playerName);
+        }
+    } else {
+        playBtn.classList.add('hidden');
+    }
+}
+
+function updatePlayerNameFromSettings() {
+    const settingsNameEl = document.getElementById('settingsPlayerName');
+    const statusEl = document.getElementById('nameUpdateStatus');
+    const playerNameEl = document.getElementById('playerName');
+
+    if (!settingsNameEl || !statusEl || !playerNameEl) return;
+
+    const newName = settingsNameEl.value.trim();
+
+
+    if (newName.length > 0) {
+        state.playerName = newName;
+        localStorage.setItem('playerName', state.playerName);
+        statusEl.textContent = `Prénom mis à jour à "${newName}"!`;
+
+        playerNameEl.value = newName;
+
+        saveGame(); // Sauvegarder immédiatement le nouveau nom sur Firestore
+    } else {
+        statusEl.textContent = "Le prénom ne peut pas être vide.";
+    }
+}
+
+
+// --- Écouteurs d'Événements ---
+
+document.addEventListener('DOMContentLoaded', () => {
+    initFirebase();
+    applyTheme(state.currentTheme);
+
+    const playerNameInput = document.getElementById('playerName');
+    if (playerNameInput) {
+        playerNameInput.value = state.playerName;
+        checkPlayerNameForPlayButton();
+
+        playerNameInput.addEventListener('input', () => {
+            checkPlayerNameForPlayButton();
+        });
+    }
+
+    // Navigation depuis l'écran de démarrage
+    const playBtn = document.getElementById('playBtn');
+    if (playBtn) playBtn.addEventListener('click', () => {
+        if (!playerNameInput || state.playerName.trim() === '') return;
+        state.playerName = playerNameInput.value.trim();
+        localStorage.setItem('playerName', state.playerName);
+
+        renderView('game');
+    });
+
+    const settingsBtnStart = document.getElementById('settingsBtnStart');
+    if (settingsBtnStart) settingsBtnStart.addEventListener('click', () => {
+        renderView('settings');
+    });
+
+    // Navigation depuis l'écran de jeu
+    const settingsBtnGame = document.getElementById('settingsBtnGame');
+    if (settingsBtnGame) settingsBtnGame.addEventListener('click', () => {
+        renderView('settings');
+    });
+
+    const indexBtnHeader = document.getElementById('indexBtnHeader');
+    if (indexBtnHeader) indexBtnHeader.addEventListener('click', () => {
+        renderView('index');
+    });
+
+    // Navigation depuis l'index
+    const returnToIndexGameBtn = document.getElementById('returnToIndexGameBtn');
+    if (returnToIndexGameBtn) returnToIndexGameBtn.addEventListener('click', () => {
+        renderView('game');
+    });
+
+    // Bouton de retour des Paramètres
+    const returnToGameBtn = document.getElementById('returnToGameBtn');
+    if (returnToGameBtn) returnToGameBtn.addEventListener('click', () => {
+        renderView('game');
+    });
+
+    // Sauvegarde
+    const saveGameBtn = document.getElementById('saveGameBtn');
+    if (saveGameBtn) saveGameBtn.addEventListener('click', saveGame);
+
+    // Mise à jour du nom depuis les paramètres
+    const updatePlayerNameBtn = document.getElementById('updatePlayerNameBtn');
+    if (updatePlayerNameBtn) updatePlayerNameBtn.addEventListener('click', updatePlayerNameFromSettings);
+
+
+    // Thèmes
+    document.querySelectorAll('.theme-select-btn').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+            const themeName = e.target.dataset.theme;
+            applyTheme(themeName);
+        });
+    });
+
+    // Si Firebase échoue, on le fait ici:
+    if (!firebaseConfig) {
+         renderView('start');
+    }
+});
+
