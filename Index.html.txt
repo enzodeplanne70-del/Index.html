@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Lumina Pro - Anthony Edition</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;900&display=swap');
+        
+        body { 
+            background: #000; 
+            color: #fff; 
+            font-family: 'Inter', sans-serif; 
+            margin: 0; 
+            height: 100dvh; 
+            overflow: hidden; 
+            touch-action: none; 
+        }
+        
+        .hide { display: none !important; }
+
+        /* SYSTÈME DE LUMIÈRE */
+        #light-system {
+            position: fixed;
+            top: 0; left: 0; width: 100vw; height: 100vh;
+            pointer-events: none;
+            z-index: 10;
+            opacity: 0;
+            display: flex;
+            justify-content: center;
+            align-items: flex-end;
+            transition: opacity 0.1s ease;
+        }
+
+        #light-beam {
+            position: absolute;
+            bottom: 150px;
+            left: 50%;
+            transform: translateX(-50%);
+            transform-origin: bottom center;
+            width: 800vw; 
+            height: 500vh;
+            mix-blend-mode: screen;
+        }
+
+        #light-glow {
+            position: absolute;
+            bottom: 140px;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 400px;
+            height: 400px;
+            filter: blur(30px);
+            border-radius: 50%;
+        }
+
+        #mega-flash {
+            position: fixed;
+            inset: 0;
+            background: white;
+            opacity: 0;
+            z-index: 9;
+            pointer-events: none;
+            transition: opacity 0.15s;
+        }
+
+        .torch-container {
+            position: fixed;
+            bottom: 40px;
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 50;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        .torch-body {
+            background: linear-gradient(90deg, #111, #333, #111);
+            border: 1px solid #222;
+            border-radius: 10px 10px 18px 18px;
+            position: relative;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+        }
+
+        .power-btn {
+            width: 34px;
+            height: 34px;
+            border-radius: 50%;
+            background: #200;
+            border: 2px solid #111;
+            position: absolute;
+            top: 45%; left: 50%;
+            transform: translate(-50%, -50%);
+            cursor: pointer;
+            transition: 0.1s;
+        }
+        
+        .power-btn.active { 
+            background: #f00; 
+            box-shadow: 0 0 25px #f00, 0 0 50px rgba(255,0,0,0.5); 
+            border-color: #fff; 
+        }
+
+        .menu-btn {
+            background: #080808;
+            border: 1px solid #1a1a1a;
+            border-radius: 20px;
+            padding: 22px;
+            width: 100%;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            transition: transform 0.1s;
+        }
+        .menu-btn:active { transform: scale(0.97); border-color: #f00; }
+
+        input {
+            background: #0a0a0a;
+            border: 2px solid #151515;
+            color: #fff;
+            padding: 16px;
+            border-radius: 12px;
+            width: 100%;
+            text-align: center;
+            font-weight: 900;
+            font-size: 1.2rem;
+            outline: none;
+        }
+        input:focus { border-color: #f00; }
+    </style>
+</head>
+<body>
+
+    <div id="mega-flash"></div>
+    <div id="light-system">
+        <div id="light-beam"></div>
+        <div id="light-glow"></div>
+    </div>
+
+    <!-- ÉCRAN PRÉNOM -->
+    <div id="scr-init" class="flex flex-col items-center justify-center h-full px-10 z-[100] relative bg-black">
+        <h1 class="text-6xl font-black italic mb-2 tracking-tighter">LUMINA</h1>
+        <p class="text-red-600 text-[10px] tracking-[0.5em] font-bold mb-16 uppercase">Edition Anthony</p>
+        <input type="text" id="name-input" placeholder="ENTRE TON PRÉNOM">
+        <button onclick="saveName()" class="mt-8 bg-red-600 text-white font-black px-14 py-4 rounded-full uppercase text-xs tracking-widest active:scale-90 transition-all">
+            Démarrer
+        </button>
+    </div>
+
+    <!-- ÉCRAN MENU -->
+    <div id="scr-menu" class="hide flex flex-col items-center justify-between h-full py-16 px-8 z-50 relative bg-black">
+        <div class="text-center">
+            <h2 id="display-name" class="text-3xl font-black italic">ANTHONY</h2>
+            <p class="text-zinc-700 text-[10px] font-bold uppercase mt-2">MATÉRIEL DISPONIBLE</p>
+        </div>
+
+        <div class="w-full space-y-4 max-w-sm">
+            <button onclick="startTorch(0)" class="menu-btn">
+                <span class="font-bold text-zinc-500">POCKET S-1</span>
+                <div class="w-3 h-6 bg-zinc-800 rounded-sm"></div>
+            </button>
+            <button onclick="startTorch(1)" class="menu-btn">
+                <span class="font-bold text-zinc-400">TACTICAL M-5</span>
+                <div class="w-5 h-8 bg-zinc-700 rounded-sm"></div>
+            </button>
+            <button onclick="startTorch(2)" class="menu-btn border-red-900/40">
+                <span class="font-black text-red-600 italic">ULTRA MEGA Z-9</span>
+                <div class="w-8 h-8 bg-red-600/10 border border-red-600 rounded flex items-center justify-center">
+                    <div class="w-3 h-5 bg-red-600 rounded-sm"></div>
+                </div>
+            </button>
+        </div>
+
+        <div class="text-center">
+            <div class="text-[9px] text-zinc-800 font-bold uppercase tracking-widest">
+                © 2025 BY ANTHONY
+            </div>
+        </div>
+    </div>
+
+    <!-- ÉCRAN JEU -->
+    <div id="scr-play" class="hide fixed inset-0 z-40">
+        <button onclick="quit()" class="absolute top-12 left-8 z-[100] bg-white/5 border border-white/10 px-6 py-2 rounded-full text-[10px] font-black uppercase">Menu</button>
+        <div class="torch-container">
+            <div id="torch-model" class="torch-body">
+                <div id="torch-btn" class="power-btn"></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let app = { n: "ANTHONY", on: false, m: 0 };
+        
+        const specs = [
+            { w: 42, h: 130, s: 45, b: 25, p: 0.8, mega: false },
+            { w: 58, h: 180, s: 95, b: 45, p: 0.9, mega: false },
+            { w: 80, h: 230, s: 170, b: 80, p: 1.0, mega: true }
+        ];
+
+        function saveName() {
+            const val = document.getElementById('name-input').value;
+            if(!val) return;
+            app.n = val;
+            document.getElementById('display-name').textContent = app.n.toUpperCase();
+            document.getElementById('scr-init').classList.add('hide');
+            document.getElementById('scr-menu').classList.remove('hide');
+        }
+
+        function startTorch(idx) {
+            app.m = idx;
+            app.on = false;
+            const sp = specs[idx];
+            const obj = document.getElementById('torch-model');
+            obj.style.width = sp.w + 'px';
+            obj.style.height = sp.h + 'px';
+            document.getElementById('scr-menu').classList.add('hide');
+            document.getElementById('scr-play').classList.remove('hide');
+            render();
+        }
+
+        function quit() { 
+            app.on = false; 
+            render(); 
+            document.getElementById('scr-play').classList.add('hide'); 
+            document.getElementById('scr-menu').classList.remove('hide'); 
+        }
+
+        document.getElementById('torch-btn').onclick = () => {
+            app.on = !app.on;
+            if(window.navigator.vibrate) window.navigator.vibrate(app.on ? 70 : 30);
+            render();
+        };
+
+        function render() {
+            const system = document.getElementById('light-system');
+            const beam = document.getElementById('light-beam');
+            const glow = document.getElementById('light-glow');
+            const flash = document.getElementById('mega-flash');
+            const btn = document.getElementById('torch-btn');
+            const sp = specs[app.m];
+
+            if(app.on) {
+                btn.classList.add('active');
+                system.style.opacity = "1";
+                const color = 'rgba(255,255,255,'+sp.p+')';
+                
+                beam.style.background = `conic-gradient(from -${sp.s/2}deg at bottom center, transparent ${50-(sp.s/6)}%, ${color} 50%, transparent ${50+(sp.s/6)}%)`;
+                beam.style.filter = `blur(${sp.b}px)`;
+                glow.style.background = `radial-gradient(circle, ${color} 0%, transparent 80%)`;
+                
+                if(sp.mega) flash.style.opacity = "0.75";
+            } else {
+                btn.classList.remove('active');
+                system.style.opacity = "0";
+                flash.style.opacity = "0";
+            }
+        }
+
+        const updatePos = (x) => {
+            if(!app.on) return;
+            const rot = (x - window.innerWidth/2) / 12;
+            document.getElementById('light-system').style.transform = `rotate(${rot}deg)`;
+        };
+        document.addEventListener('mousemove', (e) => updatePos(e.clientX));
+        document.addEventListener('touchmove', (e) => updatePos(e.touches[0].clientX));
+    </script>
+</body>
+</html>
+
